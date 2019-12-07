@@ -1,0 +1,135 @@
+<?php
+
+namespace VoiceBook\Http\Controllers;
+
+use VoiceBook\Mail\PostReply;
+use VoiceBook\Post;
+use VoiceBook\Tag;
+use VoiceBook\User;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Mail;
+use \Input as Input;
+use Image;
+
+class PostController extends Controller
+{
+    /**
+     * Create a new controller instance.
+     *
+     * @return void
+     */
+    public function __construct()
+    {
+        $this->middleware('auth');
+    }
+
+    /**
+     * Store a new post.
+     *
+     * @param  Request  $request
+     * @return Response
+     */
+    public function store(Request $request)
+    {
+        $this->validate($request, [
+            'body' => 'required|max:255',
+            'url'  => 'image|mimes:jpg,jpeg,gif,png|max:2048',
+        ]);
+
+        $postBody = $this->parseUsernames($request->body);
+        $parsed = $this->parseTags($postBody);
+
+        list($body, $tagIds) = $parsed;
+
+
+        $post = Post::create([
+            'user_id' => auth()->user()->id,
+            'body' => $body,
+
+        ]);
+
+
+        if ($request->hasFile('url')) {
+                $url = $request->url;
+                $filename = time() . '.' . $url->extension();
+                Image::make($url)->save(public_path('/uploads/posts/' . $filename));
+                $post->url = $filename;
+                $post->save();
+            }
+
+        empty($tagIds) ? : $post->tags()->sync(array_unique($tagIds));
+
+        return back();
+    }
+
+    /**
+     * Remove the specified post from storage.
+     *
+     * @param  Post  $post
+     * @return \Illuminate\Http\Response
+     */
+    public function destroy(Post $post)
+    {
+        $post->delete();
+        return back();
+    }
+
+    /**
+     * Parse usernames from post body.
+     *
+     * @param  string $postBody
+     * @return string
+     */
+
+    private function parseUsernames($postBody)
+    {
+        preg_match_all("/@(\\w+)/", $postBody, $usernames);
+
+        if (!empty($usernames)) {
+            foreach ($usernames[1] as $username) {
+                if (!User::whereUsername($username)->get()->isEmpty()) {
+                    $postBody = preg_replace("/(@\\w+)/", '<a href="/' . $username . '">${1}</a>', $postBody);
+                    // Notify
+                    $recipient = User::whereUsername($username)->first();
+                    $sender = Auth::user();
+                    Mail::to($recipient)->send(new PostReply($recipient, $sender));
+                }
+            }
+        }
+
+        return $postBody;
+    }
+
+    /**
+     * Parse hash tags from post body.
+     *
+     * @param  string $postBody
+     * @return array
+     */
+
+    private function parseTags($postBody)
+    {
+        preg_match_all("/#(\\w+)/", $postBody, $tagnames);
+
+        $tagIds = [];
+
+        if (!empty($tagnames[1])) {
+            foreach ($tagnames[1] as $tagname) {
+                if (Tag::whereName($tagname)->get()->isEmpty()) {
+                    $tag = new Tag();
+                    $tag->name = $tagname;
+                    $tag->save();
+                    $tagIds[] = $tag->id;
+                } else {
+                    $tag = Tag::whereName($tagname)->first();
+                    $tagIds[] = $tag->id;
+                }
+                $postBody = preg_replace("/(#\\w+)/", '<a href="/tags/' . $tag->id . '">${1}</a>', $postBody);
+            }
+        }
+
+        return [$postBody, $tagIds];
+    }
+
+}
